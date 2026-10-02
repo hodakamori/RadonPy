@@ -31,7 +31,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<9"]
 lammps = [
     "lammps>=2020.03.03",
 ]
@@ -62,11 +61,3 @@ radonpy = [
 
 [tool.setuptools.dynamic]
 version = {attr = "radonpy.__version__"}
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-markers = [
-    "engines: invokes LAMMPS and/or GROMACS executables",
-    "slow: longer integration tests",
-]

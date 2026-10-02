@@ -17,13 +17,25 @@ def molecule():
 
 
 @pytest.fixture
-def engines(request):
-    result = {'lammps': os.environ.get('LAMMPS_EXEC', 'lmp'),
-              'gromacs': os.environ.get('GROMACS_EXEC', 'gmx')}
-    missing = [name for name, exe in result.items() if shutil.which(exe) is None]
-    if missing:
-        message = 'Missing MD executables: '+', '.join(missing)
+def lammps_exec(request):
+    return _executable(request, 'LAMMPS_EXEC', 'lmp')
+
+
+@pytest.fixture
+def gromacs_exec(request):
+    return _executable(request, 'GROMACS_EXEC', 'gmx')
+
+
+def _executable(request, variable, default):
+    executable = os.environ.get(variable, default)
+    if shutil.which(executable) is None:
+        message = 'Missing MD executable: %s=%s' % (variable, executable)
         if request.config.getoption('--require-engines'):
             pytest.fail(message)
         pytest.skip(message)
-    return result
+    return executable
+
+
+@pytest.fixture
+def engines(lammps_exec, gromacs_exec):
+    return {'lammps': lammps_exec, 'gromacs': gromacs_exec}

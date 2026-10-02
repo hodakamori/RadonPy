@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
-from radonpy.sim.validation import (compare_properties, compare_static,
-                                   PROPERTY_MARGINS, block_means, autocorrelation_time)
+from tests.helpers.validation import (compare_properties, compare_static,
+                                      PROPERTY_MARGINS, block_means, autocorrelation_time)
 
 
 def records(shift=0):

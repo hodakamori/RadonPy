@@ -9,9 +9,12 @@
 from ..core import utils
 from . import lammps
 
-# The executable is checked when running, not when importing RadonPy.
-from . import gromacs
-gromacs_avail = True
+# Try to load unpublished modules
+try:
+    from ..dev.sim import gromacs
+    gromacs_avail = True
+except ImportError:
+    gromacs_avail = False
 
 
 __version__ = '1.0b1'
@@ -28,8 +31,6 @@ def MD_solver(md_solver='lammps', work_dir=None, solver_path=None, **kwargs):
             return gromacs.Gromacs(work_dir=work_dir, solver_path=solver_path, **kwargs)
         else:
             utils.radon_print('Gromacs is not available.', level=3)
-    else:
-        raise ValueError('Unknown MD solver: %s' % md_solver)
 
 
 
@@ -44,6 +45,5 @@ def MD_analyzer(md_analyzer='lammps', **kwargs):
             return gromacs.Analyze(**kwargs)
         else:
             utils.radon_print('Gromacs is not available.', level=3)
-    else:
-        raise ValueError('Unknown MD analyzer: %s' % md_analyzer)
+
 

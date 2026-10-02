@@ -23,11 +23,11 @@ def test_legacy_input_settings_are_unchanged(molecule, tmp_path):
 @pytest.mark.engines
 @pytest.mark.parametrize('fixture', ['butane_gaff2'] + [p+'_'+f for p in ('pe', 'ps', 'pmma')
                                                       for f in ('gaff', 'gaff2', 'gaff2_mod')])
-def test_legacy_against_original_checkout(fixture, engines, tmp_path):
+def test_legacy_against_original_checkout(fixture, lammps_exec, tmp_path):
     reference = json.loads((FIXTURES/'lammps_reference.json').read_text())['fixtures'][fixture+'.json']
     source = FIXTURES/(fixture+'.json')
     assert hashlib.sha256(source.read_bytes()).hexdigest() == reference['sha256']
     energy, force = md.quick_energy(utils.JSONToMol(str(source)), work_dir=str(tmp_path),
-                                   solver_path=engines['lammps'], omp=0, mpi=0)
+                                   solver_path=lammps_exec, omp=0, mpi=0)
     np.testing.assert_allclose(energy, reference['energy_kcal_mol'], atol=1e-5, rtol=1e-6)
     np.testing.assert_allclose(force, reference['force_kcal_mol_angstrom'], atol=1e-4, rtol=1e-5)

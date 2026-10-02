@@ -153,15 +153,6 @@ MD simulations are available in this installation, but DFT calculations (conform
 	- Monomerization of oligomer SMILES
 	- Emulator of polymer classification in PoLyInfo
 
-## Experimental GROMACS support
-
-Basic MD and equilibrium presets can select GROMACS with an explicit portable
-interaction profile. LAMMPS remains the default. See the
-[GROMACS guide](docs/gromacs.md) for supported features, reproducible tests,
-statistical equivalence campaigns, limitations and module-by-module upstream
-PR boundaries. Long-time property equivalence and GPU speedup are not yet
-established.
-
 ## MD calculated data
 - [1070 amorphous polymers](https://github.com/RadonPy/RadonPy/blob/develop/data/PI1070.csv)
 
@@ -214,3 +205,4 @@ Released under the `BSD-3 license`.
 
 
 ![Radon_ikaho](https://user-images.githubusercontent.com/83273612/158885745-224f6e7a-4b1d-46f4-b5c6-80455827c904.png)
+

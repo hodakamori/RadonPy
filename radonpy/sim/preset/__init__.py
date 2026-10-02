@@ -12,13 +12,12 @@ from ...core import utils
 
 class Preset():
     def __init__(self, mol, prefix='', work_dir=None, save_dir=None, solver_path=None, **kwargs):
-        if kwargs.get('solver', 'lammps').lower() == 'gromacs' and type(self).__module__ != 'radonpy.sim.preset.eq':
-            raise NotImplementedError('GROMACS is currently supported only by the eq presets')
         self.mol = utils.deepcopy_mol(mol)
         self.prefix = prefix if prefix == '' else prefix+'_'
         self.work_dir = work_dir if work_dir is not None else './'
         self.save_dir = save_dir if save_dir is not None else os.path.join(self.work_dir, 'analyze')
-        os.makedirs(self.save_dir, exist_ok=True)
+        if not os.path.isdir(self.save_dir):
+            os.mkdir(self.save_dir)
         self.solver_path = solver_path
         self.in_file = kwargs.get('in_file', '%seq1.in' % prefix)
         self.top_file = kwargs.get('top_file', '%seq1.data' % prefix)
@@ -68,3 +67,4 @@ class Preset():
         else:
             self.mol.SetProp('improper_style', 'cvff')
             self.improper_style = 'cvff'
+

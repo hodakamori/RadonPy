@@ -14,8 +14,6 @@ import numpy as np
 from ...core import calc, const, utils
 from .. import lammps, preset
 from ..md import MD
-from ..md_wrapper import MD_solver
-from ..profiles import apply_profile
 
 __version__ = '1.0b2'
 
@@ -32,14 +30,6 @@ class Equilibration(preset.Preset):
         """
         super().__init__(mol, prefix=prefix, work_dir=work_dir, save_dir=save_dir, solver_path=solver_path, **kwargs)
 
-        self.solver = kwargs.get('solver', 'lammps').lower()
-        self.interaction_profile = kwargs.get('interaction_profile')
-        self.thermo_freq = kwargs.get('thermo_freq', 1000)
-        self.dump_freq = kwargs.get('dump_freq', 1000)
-        if self.solver not in ('lammps', 'gromacs'):
-            raise ValueError('Unknown MD solver: %s' % self.solver)
-        if self.solver == 'gromacs' and self.interaction_profile != 'portable':
-            raise ValueError("GROMACS equilibration requires interaction_profile='portable'")
         self.in_file1 = kwargs.get('in_file1', '%seq1.in' % self.prefix)
         self.in_file2 = kwargs.get('in_file2', '%seq2.in' % self.prefix)
         self.in_file = kwargs.get('in_file', '%seq3.in' % self.prefix)
@@ -79,27 +69,13 @@ class Equilibration(preset.Preset):
         self.json_file = kwargs.get('json_file', '%seq3_last.json' % self.prefix)
 
 
-    def _prepare_md(self, md):
-        md.thermo_freq = getattr(self, 'thermo_freq', md.thermo_freq)
-        md.dump_freq = getattr(self, 'dump_freq', md.dump_freq)
-        if self.solver == 'gromacs':
-            for wf in md.wf:
-                if wf.type == 'md' and wf.ensemble == 'npt':
-                    wf.barostat = 'Parrinello-Rahman'
-        return apply_profile(md)
-
-    def make_lammps_input(self, *args, **kwargs):
-        if self.solver != 'lammps':
-            raise ValueError('Use make_input for the selected GROMACS engine')
-        return self.make_input(*args, **kwargs)
-
     def packing(self, f_density=0.8, max_temp=700, comm_cutoff=8.0, **kwargs):
 
         mass = calc.mol_mass(self.mol)
         f_length = np.cbrt( (mass / const.NA) / (f_density / const.cm2ang**3)) / 2
 
         # Initial relaxation and packing
-        md = MD(mol=self.mol, interaction_profile=self.interaction_profile)
+        md = MD(mol=self.mol)
         md.pair_style = 'lj/cut'
         md.cutoff_in = 3.0
         md.cutoff_out = ''
@@ -116,23 +92,21 @@ class Equilibration(preset.Preset):
         md.rst = True
         md.outstr = kwargs.get('last_str', self.last_str1)
         md.write_data = kwargs.get('last_data', self.last_data1)
-        if self.solver == 'lammps':
-            md.add.append('comm_modify cutoff %f' % comm_cutoff)
+        md.add.append('comm_modify cutoff %f' % comm_cutoff)
 
-        packing_steps = kwargs.pop('packing_steps', (20000, 1000000, 1000000))
         md.add_min(min_style='cg')
-        md.add_md('nvt', packing_steps[0], time_step=0.1, shake=False, t_start=300.0, t_stop=300.0, **kwargs)
-        md.add_md('nvt', packing_steps[1], time_step=1.0, shake=True, t_start=300.0, t_stop=max_temp, **kwargs)
-        md.add_md('nvt', packing_steps[2], time_step=1.0, shake=True, t_start=max_temp, t_stop=max_temp, **kwargs)
+        md.add_md('nvt', 20000, time_step=0.1, shake=False, t_start=300.0, t_stop=300.0, **kwargs)
+        md.add_md('nvt', 1000000, time_step=1.0, shake=True, t_start=300.0, t_stop=max_temp, **kwargs)
+        md.add_md('nvt', 1000000, time_step=1.0, shake=True, t_start=max_temp, t_stop=max_temp, **kwargs)
         md.wf[-1].add_deform(dftype='final', deform_fin_lo=-f_length, deform_fin_hi=f_length, axis='xyz')
 
-        return self._prepare_md(md)
+        return md
 
 
     def annealing(self, max_temp=700.0, temp=300.0, press=1.0, step=5000000, set_init_velocity=False, **kwargs):
 
         p_dump = 1000
-        md = MD(mol=self.mol, interaction_profile=self.interaction_profile)
+        md = MD(mol=self.mol)
         md.pair_style = self.pair_style
         md.cutoff_in = self.cutoff_in
         md.cutoff_out = self.cutoff_out
@@ -155,18 +129,16 @@ class Equilibration(preset.Preset):
         #if polarizable:
         #    md.add_drude()
 
-        pre_steps = kwargs.pop('annealing_pre_steps', (20000, 100000, 20000))
-        md.add_md('nvt', pre_steps[0], time_step=0.2, shake=False, t_start=max_temp, t_stop=max_temp, **kwargs)
-        md.add_md('nvt', pre_steps[1], time_step=1.0, shake=True, t_start=max_temp, t_stop=max_temp, **kwargs)
-        md.add_md('npt', pre_steps[2], time_step=1.0, shake=True, t_start=max_temp, t_stop=max_temp, p_start=press, p_stop=press, p_dump=p_dump, **kwargs)
+        md.add_md('nvt', 20000, time_step=0.2, shake=False, t_start=max_temp, t_stop=max_temp, **kwargs)
+        md.add_md('nvt', 100000, time_step=1.0, shake=True, t_start=max_temp, t_stop=max_temp, **kwargs)
+        md.add_md('npt', 20000, time_step=1.0, shake=True, t_start=max_temp, t_stop=max_temp, p_start=press, p_stop=press, p_dump=p_dump, **kwargs)
 
-        chunk_steps = kwargs.pop('annealing_chunk_steps', 100000)
-        a_temp = np.linspace(max_temp, temp, int(step/chunk_steps)+1)
+        a_temp = np.linspace(max_temp, temp, int(step/100000)+1)
         for i in range(len(a_temp)-1):
-            md.add_md('npt', chunk_steps, time_step=1.0, shake=True, t_start=a_temp[i], t_stop=a_temp[i+1],
+            md.add_md('npt', 100000, time_step=1.0, shake=True, t_start=a_temp[i], t_stop=a_temp[i+1],
                       p_start=press, p_stop=press, p_dump=p_dump, **kwargs)
 
-        return self._prepare_md(md)
+        return md
 
 
     def eq21step(self, temp=300, max_temp=600, press=1.0, max_press=50000, time_step=1.0,
@@ -187,7 +159,7 @@ class Equilibration(preset.Preset):
             press_ratio = [0.02, 0.60, 1.00, 0.50, 0.10, 0.01]
 
         p_dump = 1000
-        md = MD(mol=self.mol, interaction_profile=self.interaction_profile)
+        md = MD(mol=self.mol)
         md.pair_style = self.pair_style
         md.cutoff_in = self.cutoff_in
         md.cutoff_out = self.cutoff_out
@@ -214,18 +186,18 @@ class Equilibration(preset.Preset):
         press_list = np.append(np.array(press_ratio) * max_press, press)
         for s, p in zip(step_list, press_list):
             md.add_md('nvt', int(s[0]), time_step=time_step, shake=True, t_start=max_temp, t_stop=max_temp,
-                      add=['neigh_modify delay 0 every 1 check yes'] if self.solver == 'lammps' else [], **kwargs)
+                      add=['neigh_modify delay 0 every 1 check yes'], **kwargs)
             md.add_md('nvt', int(s[1]), time_step=time_step, shake=True, t_start=temp, t_stop=temp, **kwargs)
             md.add_md('npt', int(s[2]), time_step=time_step, shake=True, t_start=temp, t_stop=temp,
-                      p_start=p, p_stop=p, p_dump=p_dump, add=['neigh_modify delay 0 every 1 check no'] if self.solver == 'lammps' else [], **kwargs)
+                      p_start=p, p_stop=p, p_dump=p_dump, add=['neigh_modify delay 0 every 1 check no'], **kwargs)
 
-        return self._prepare_md(md)
+        return md
 
 
     def sampling(self, temp=300.0, press=1.0, step=5000000, **kwargs):
 
         p_dump = 1000
-        md = MD(mol=self.mol, interaction_profile=self.interaction_profile)
+        md = MD(mol=self.mol)
         md.pair_style = self.pair_style
         md.cutoff_in = self.cutoff_in
         md.cutoff_out = self.cutoff_out
@@ -253,16 +225,12 @@ class Equilibration(preset.Preset):
         md.wf[-1].add_rg(file=self.rg_file)
         md.wf[-1].add_msd()
 
-        return self._prepare_md(md)
+        return md
 
 
     def analyze(self, ignore_log=[], **kwargs):
 
-        analyzer_class = Equilibration_analyze
-        if self.solver == 'gromacs':
-            from ..gromacs import Analyze
-            analyzer_class = Analyze
-        analy = analyzer_class(
+        analy = Equilibration_analyze(
             log_file  = os.path.join(self.work_dir, self.log_file),
             traj_file = os.path.join(self.work_dir, self.xtc_file),
             pdb_file  = os.path.join(self.work_dir, self.pdb_file),
@@ -324,11 +292,11 @@ class Annealing(Equilibration):
         """
 
         utils.MolToPDBFile(self.mol, os.path.join(self.work_dir, self.pdb_file))
-        lmp = MD_solver(self.solver, work_dir=self.work_dir, solver_path=self.solver_path)
+        lmp = lammps.LAMMPS(work_dir=self.work_dir, solver_path=self.solver_path)
         lmp.make_dat(self.mol, file_name=self.dat_file1, confId=confId)
 
         dt1 = datetime.datetime.now()
-        utils.radon_print('Packing simulation (eq1) by %s is running...' % self.solver, level=1)
+        utils.radon_print('Packing simulation (eq1) by LAMMPS is running...', level=1)
         md1 = self.packing(f_density=f_density, max_temp=max_temp, comm_cutoff=kwargs.get('comm_cutoff', 8.0), **kwargs)
         self.mol = lmp.run(md1, mol=self.mol, confId=confId, input_file=self.in_file1, last_str=self.last_str1, last_data=self.last_data1,
                            omp=omp, mpi=mpi, gpu=gpu, intel=intel, opt=opt)
@@ -338,7 +306,7 @@ class Annealing(Equilibration):
         utils.radon_print('Complete packing simulation (eq1). Elapsed time = %s' % str(dt2-dt1), level=1)
 
         dt1 = datetime.datetime.now()
-        utils.radon_print('Annealing simulation (eq2) by %s is running...' % self.solver, level=1)
+        utils.radon_print('Annealing simulation (eq2) by LAMMPS is running...', level=1)
         md2 = self.annealing(max_temp=max_temp, temp=temp, press=press, step=int(1000000*ann_step), set_init_velocity=True, **kwargs)
         self.mol = lmp.run(md2, mol=self.mol, confId=confId, input_file=self.in_file2, last_str=self.last_str2, last_data=self.last_data2,
                            omp=omp, mpi=mpi, gpu=gpu, intel=intel, opt=opt)
@@ -348,7 +316,7 @@ class Annealing(Equilibration):
         utils.radon_print('Complete annealing simulation (eq2). Elapsed time = %s' % str(dt2-dt1), level=1)
 
         dt1 = datetime.datetime.now()
-        utils.radon_print('Sampling simulation (eq3) by %s is running...' % self.solver, level=1)
+        utils.radon_print('Sampling simulation (eq3) by LAMMPS is running...', level=1)
         md3 = self.sampling(temp=temp, press=press, step=int(1000000*eq_step), **kwargs)
         self.mol = lmp.run(md3, mol=self.mol, confId=confId, input_file=self.in_file, last_str=self.last_str, last_data=self.last_data,
                            omp=omp, mpi=mpi, gpu=gpu, intel=intel, opt=opt)
@@ -360,12 +328,10 @@ class Annealing(Equilibration):
         return self.mol
 
 
-    def make_input(self, confId=0, f_density=0.8, max_temp=700.0, temp=300.0, press=1.0, ann_step=5, eq_step=8, **kwargs):
+    def make_lammps_input(self, confId=0, f_density=0.8, max_temp=700.0, temp=300.0, press=1.0, ann_step=5, eq_step=8, **kwargs):
 
-        if self.solver == 'gromacs':
-            raise NotImplementedError('Use exec(): GROMACS stage inputs depend on preceding stage outputs')
         utils.MolToPDBFile(self.mol, os.path.join(self.work_dir, self.pdb_file))
-        lmp = MD_solver(self.solver, work_dir=self.work_dir, solver_path=self.solver_path)
+        lmp = lammps.LAMMPS(work_dir=self.work_dir, solver_path=self.solver_path)
         lmp.make_dat(self.mol, file_name=self.dat_file1, confId=confId)
 
         md1 = self.packing(f_density=f_density, max_temp=max_temp, comm_cutoff=kwargs.get('comm_cutoff', 8.0), **kwargs)
@@ -407,11 +373,11 @@ class EQ21step(Equilibration):
         """
 
         utils.MolToPDBFile(self.mol, os.path.join(self.work_dir, self.pdb_file))
-        lmp = MD_solver(self.solver, work_dir=self.work_dir, solver_path=self.solver_path)
+        lmp = lammps.LAMMPS(work_dir=self.work_dir, solver_path=self.solver_path)
         lmp.make_dat(self.mol, file_name=self.dat_file1, confId=confId)
 
         dt1 = datetime.datetime.now()
-        utils.radon_print('Packing simulation (eq1) by %s is running...' % self.solver, level=1)
+        utils.radon_print('Packing simulation (eq1) by LAMMPS is running...', level=1)
         md1 = self.packing(f_density=f_density, comm_cutoff=kwargs.get('comm_cutoff', 8.0), **kwargs)
         self.mol = lmp.run(md1, mol=self.mol, confId=confId, input_file=self.in_file1, last_str=self.last_str1, last_data=self.last_data1,
                            omp=omp, mpi=mpi, gpu=gpu, intel=intel, opt=opt)
@@ -421,7 +387,7 @@ class EQ21step(Equilibration):
         utils.radon_print('Complete packing simulation (eq1). Elapsed time = %s' % str(dt2-dt1), level=1)
 
         dt1 = datetime.datetime.now()
-        utils.radon_print('Larsen\'s 21 step compression/decompression equilibration (eq2) by %s is running...' % self.solver, level=1)
+        utils.radon_print('Larsen\'s 21 step compression/decompression equilibration (eq2) by LAMMPS is running...', level=1)
         md2 = self.eq21step(max_temp=max_temp, temp=temp, press=press, max_press=max_press,
                             step_list=step_list, press_ratio=press_ratio, time_step=time_step, set_init_velocity=True, **kwargs)
         self.mol = lmp.run(md2, mol=self.mol, confId=confId, input_file=self.in_file2, last_str=self.last_str2, last_data=self.last_data2,
@@ -432,7 +398,7 @@ class EQ21step(Equilibration):
         utils.radon_print('Complete Larsen 21 step compression/decompression equilibration (eq2). Elapsed time = %s' % str(dt2-dt1), level=1)
 
         dt1 = datetime.datetime.now()
-        utils.radon_print('Sampling simulation (eq3) by %s is running...' % self.solver, level=1)
+        utils.radon_print('Sampling simulation (eq3) by LAMMPS is running...', level=1)
         md3 = self.sampling(temp=temp, press=press, step=int(1000000*eq_step), **kwargs)
         self.mol = lmp.run(md3, mol=self.mol, confId=confId, input_file=self.in_file, last_str=self.last_str, last_data=self.last_data,
                            omp=omp, mpi=mpi, gpu=gpu, intel=intel, opt=opt)
@@ -444,13 +410,11 @@ class EQ21step(Equilibration):
         return self.mol
 
 
-    def make_input(self, confId=0, f_density=0.8, max_temp=600.0, temp=300.0, press=1.0, max_press=50000,
+    def make_lammps_input(self, confId=0, f_density=0.8, max_temp=600.0, temp=300.0, press=1.0, max_press=50000,
                           step_list=None, press_ratio=None, time_step=1.0, eq_step=5, **kwargs):
 
-        if self.solver == 'gromacs':
-            raise NotImplementedError('Use exec(): GROMACS stage inputs depend on preceding stage outputs')
         utils.MolToPDBFile(self.mol, os.path.join(self.work_dir, self.pdb_file))
-        lmp = MD_solver(self.solver, work_dir=self.work_dir, solver_path=self.solver_path)
+        lmp = lammps.LAMMPS(work_dir=self.work_dir, solver_path=self.solver_path)
         lmp.make_dat(self.mol, file_name=self.dat_file1, confId=confId)
 
         md1 = self.packing(f_density=f_density, comm_cutoff=kwargs.get('comm_cutoff', 8.0), **kwargs)
@@ -478,7 +442,7 @@ class Additional(Equilibration):
         Args:
             mol: RDKit Mol object
         """
-        super().__init__(mol, prefix=prefix, work_dir=work_dir, save_dir=save_dir, solver_path=solver_path, **kwargs)
+        super().__init__(mol, prefix=prefix, work_dir=work_dir, solver_path=solver_path, **kwargs)
 
         self.idx = get_final_idx(self.work_dir) + 1 if idx == 0 else idx
 
@@ -517,11 +481,11 @@ class Additional(Equilibration):
         """
 
         utils.MolToPDBFile(self.mol, os.path.join(self.work_dir, self.pdb_file))
-        lmp = MD_solver(self.solver, work_dir=self.work_dir, solver_path=self.solver_path)
+        lmp = lammps.LAMMPS(work_dir=self.work_dir, solver_path=self.solver_path)
         lmp.make_dat(self.mol, file_name=self.dat_file, confId=confId)
 
         dt1 = datetime.datetime.now()
-        utils.radon_print('Additional equilibration (eq%i) by %s is running...' % (self.idx, self.solver), level=1)
+        utils.radon_print('Additional equilibration (eq%i) by LAMMPS is running...' % self.idx, level=1)
         md = self.sampling(temp=temp, press=press, step=int(1000000*eq_step), **kwargs)
         self.mol = lmp.run(md, mol=self.mol, confId=confId, input_file=self.in_file, last_str=self.last_str, last_data=self.last_data,
                            omp=omp, mpi=mpi, gpu=gpu, intel=intel, opt=opt)
@@ -533,12 +497,10 @@ class Additional(Equilibration):
         return self.mol
 
 
-    def make_input(self, confId=0, temp=300.0, press=1.0, eq_step=5, omp=1, mpi=1, gpu=0, **kwargs):
+    def make_lammps_input(self, confId=0, temp=300.0, press=1.0, eq_step=5, omp=1, mpi=1, gpu=0, **kwargs):
 
-        if self.solver == 'gromacs':
-            raise NotImplementedError('Use exec(): GROMACS stage inputs depend on preceding stage outputs')
         utils.MolToPDBFile(self.mol, os.path.join(self.work_dir, self.pdb_file))
-        lmp = MD_solver(self.solver, work_dir=self.work_dir, solver_path=self.solver_path)
+        lmp = lammps.LAMMPS(work_dir=self.work_dir, solver_path=self.solver_path)
         lmp.make_dat(self.mol, file_name=self.dat_file, confId=confId)
 
         md = self.sampling(temp=temp, press=press, step=int(1000000*eq_step), **kwargs)

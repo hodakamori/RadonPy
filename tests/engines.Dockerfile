@@ -28,9 +28,9 @@ RUN git clone --depth 1 --branch stable_29Aug2024_update2 https://github.com/lam
     && cmake --install /tmp/lmp-build \
     && rm -rf /tmp/lammps /tmp/lmp-build
 
-COPY tests/requirements.lock /tmp/requirements.lock
+COPY requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir -r /tmp/requirements.lock
 ENV GROMACS_EXEC=/opt/gromacs/bin/gmx_d LAMMPS_EXEC=/opt/lammps/bin/lmp
 ENV MPLBACKEND=Agg OMP_NUM_THREADS=1
 WORKDIR /work
-CMD ["python", "-m", "pytest", "--require-engines", "-q"]
+CMD ["python", "-m", "pytest", "-c", "tests/pytest.ini", "tests", "--require-engines", "-q"]

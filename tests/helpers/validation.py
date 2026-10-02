@@ -1,4 +1,4 @@
-"""Numerical and statistical equivalence checks for MD backends.
+"""Test-only numerical and statistical equivalence checks for MD engines.
 
 Independent cells, not correlated trajectory frames, are the replicates in
 ``compare_properties``. A confidence interval overlapping zero is NOT evidence
@@ -7,6 +7,7 @@ of equivalence: the whole interval must lie within the prespecified margin.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import sys
@@ -130,9 +131,11 @@ Absolute margins and pilot reference scales must be fixed before production.
 
 
 def static_report(fixture, output, lammps_exec=None, gromacs_exec=None):
-    from ..core import utils
-    from . import md
-    from .md_wrapper import MD_solver, MD_analyzer
+    from radonpy.core import utils
+    from radonpy.sim import md
+    from . import gromacs, lammps
+    lammps_exec = lammps_exec or os.environ.get('LAMMPS_EXEC', 'lmp')
+    gromacs_exec = gromacs_exec or os.environ.get('GROMACS_EXEC', 'gmx')
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     molecule = utils.JSONToMol(str(fixture))
@@ -140,20 +143,21 @@ def static_report(fixture, output, lammps_exec=None, gromacs_exec=None):
     for label, engine, profile, executable in [('A', 'lammps', None, lammps_exec),
             ('B', 'lammps', 'portable', lammps_exec), ('C', 'gromacs', 'portable', gromacs_exec)]:
         work = output/label
-        work.mkdir(exist_ok=False)
         start = time.perf_counter()
-        result = md.quick_energy(utils.deepcopy_mol(molecule), solver=engine,
-            solver_path=executable, work_dir=str(work), interaction_profile=profile)
+        if label == 'A':
+            work.mkdir(exist_ok=False)
+            result = md.quick_energy(utils.deepcopy_mol(molecule), solver_path=executable,
+                                     work_dir=str(work), omp=1, mpi=0)
+        else:
+            runner = lammps if engine == 'lammps' else gromacs
+            result = runner.single_point(molecule, work, executable)
         elapsed = time.perf_counter()-start
-        solver = MD_solver(engine, work_dir=str(work), solver_path=executable)
-        analyzer = MD_analyzer(engine, log_file=str(work/'radon_md.log'))
-        frame = analyzer.dfs[-1].iloc[-1]
-        terms = {k: float(frame[k])*4.184 for k in ('E_bond', 'E_angle', 'E_dihed', 'E_impro', 'E_vdwl')}
-        terms['electrostatics'] = float(frame['E_coul']+frame['E_long'])*4.184
+        version = ((work/'version.txt').read_text() if engine == 'gromacs' else
+                   lammps.lammps.LAMMPS(work_dir=str(work), solver_path=executable).get_version())
         results[label] = result
         np.savez(work/'result.npz', energy=result[0], force=result[1])
-        details[label] = {'engine': engine, 'profile': profile, 'version': str(solver.get_version()),
-                          'seconds_including_io': elapsed, 'energy_terms_kj_mol': terms}
+        details[label] = {'engine': engine, 'profile': profile, 'version': str(version),
+                          'seconds_including_io': elapsed, 'energy_kj_mol': float(result[0])*4.184}
     report = {'schema': 1, 'fixture': str(Path(fixture).resolve()),
               'fixture_sha256': hashlib.sha256(Path(fixture).read_bytes()).hexdigest(),
               'python': sys.version, 'platform': platform.platform(), 'runs': details,

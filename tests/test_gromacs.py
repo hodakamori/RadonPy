@@ -1,11 +1,11 @@
-import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from radonpy.sim import gromacs, md
-from radonpy.sim.md_wrapper import MD_solver, MD_analyzer
+from radonpy.sim import md
+from tests.helpers import gromacs, lammps
+from tests.helpers.validation import compare_static
 from radonpy.core import utils
 
 
@@ -21,32 +21,27 @@ def test_conversion(molecule):
                              for j in range(i+1, molecule.GetNumAtoms()))
 
 
-def test_profile_is_explicit(molecule, tmp_path):
-    solver = gromacs.Gromacs(tmp_path)
-    solver.make_dat(molecule)
-    with pytest.raises(ValueError, match='interaction_profile'):
-        solver.make_input(md.MD(mol=molecule))
-    options = md.MD(mol=molecule, interaction_profile='portable')
-    options.add_md('nve', 10)
+def test_comparison_settings_are_local(molecule, tmp_path):
+    options = lammps.comparison_options(molecule)
+    solver = lammps.lammps.LAMMPS(work_dir=str(tmp_path), check_lammps_package=False)
     solver.make_input(options)
-    options.wf[0].nve_limit = 0.1
-    with pytest.raises(NotImplementedError, match='nve/limit'):
-        solver.make_input(options)
+    generated = (tmp_path/options.input_file).read_text()
+    assert 'pair_style lj/cut/coul/long 12.0 12.0' in generated
+    assert 'pair_modify mix arithmetic shift no tail no' in generated
+    assert 'kspace_style pppm 1e-8' in generated
+    assert md.MD(mol=molecule).pair_style == 'lj/charmm/coul/long'
 
 
-def test_unsupported_and_unknown(molecule):
+def test_unsupported_charge(molecule):
     molecule.GetAtomWithIdx(0).SetDoubleProp('AtomicCharge', 1)
     with pytest.raises(NotImplementedError, match='charge-neutral'):
         gromacs.topology(molecule)
-    for factory in (MD_solver, MD_analyzer):
-        with pytest.raises(ValueError, match='Unknown'):
-            factory('typo')
 
 
 def test_extended_precision_roundtrip(molecule, tmp_path):
     molecule.GetConformer().SetAtomPosition(0, [1.12345678912, 2.33333333333, -4.23456789123])
-    solver = gromacs.Gromacs(tmp_path)
-    path = solver.make_dat(molecule, velocity=False)
+    path = tmp_path/'molecule.json'
+    gromacs._write_molecule(molecule, path)
     np.testing.assert_allclose(gromacs._read_molecule(path).GetConformer().GetPositions(),
                                molecule.GetConformer().GetPositions(), atol=1e-10, rtol=0)
 
@@ -56,38 +51,15 @@ def test_extended_precision_roundtrip(molecule, tmp_path):
                                                        for f in ('gaff', 'gaff2', 'gaff2_mod')])
 def test_single_point_parity(fixture, engines, tmp_path):
     molecule = utils.JSONToMol(str(Path(__file__).parent/'fixtures'/(fixture+'.json')))
-    results = {}
-    for engine, executable in engines.items():
-        work = tmp_path/engine
-        work.mkdir()
-        results[engine] = md.quick_energy(utils.deepcopy_mol(molecule), solver=engine,
-            solver_path=executable, work_dir=str(work), interaction_profile='portable')
-    le, lf = results['lammps']; ge, gf = results['gromacs']
-    np.testing.assert_allclose(ge*4.184/molecule.GetNumAtoms(), le*4.184/molecule.GetNumAtoms(),
-                               atol=1e-4, rtol=1e-5)
-    np.testing.assert_allclose(gf*41.84, lf*41.84, atol=1e-2, rtol=1e-4)
-
-
-@pytest.mark.engines
-def test_minimization_and_conformers(molecule, engines, tmp_path):
-    from rdkit import Chem
-    molecule.AddConformer(Chem.Conformer(molecule.GetConformer()), assignId=True)
-    for conformer, cid in zip(molecule.GetConformers(), (7, 13)):
-        conformer.SetId(cid)
-    result, energies, xyz = md.quick_min_all(molecule, solver='gromacs',
-        solver_path=engines['gromacs'], work_dir=str(tmp_path), mpi=0,
-        interaction_profile='portable', ftol=.01, maxiter=500)
-    assert result.GetNumConformers() == 2
-    assert [c.GetId() for c in result.GetConformers()] == [7, 13]
-    assert len(energies) == len(xyz) == 2
-    assert energies[0] < 14
-    np.testing.assert_allclose(energies[0], energies[1], atol=1e-8)
+    reference = lammps.single_point(molecule, tmp_path/'lammps', engines['lammps'])
+    candidate = gromacs.single_point(molecule, tmp_path/'gromacs', engines['gromacs'])
+    comparison = compare_static(reference, candidate, molecule.GetNumAtoms())
+    assert comparison['status'] == 'pass', comparison
 
 
 @pytest.mark.engines
 def test_inter_molecular_and_boundary_parity(molecule, engines, tmp_path):
     from radonpy.core import poly
-    from radonpy.sim.validation import compare_static
     atoms = molecule.GetNumAtoms()
     cell = poly.super_cell(molecule, x=2, y=1, z=1)
     xyz = cell.GetConformer().GetPositions()
@@ -100,44 +72,21 @@ def test_inter_molecular_and_boundary_parity(molecule, engines, tmp_path):
     xyz = (xyz-origin) % lengths+origin
     for i, position in enumerate(xyz):
         cell.GetConformer().SetAtomPosition(i, position)
-    results = {}
-    for engine, executable in engines.items():
-        work = tmp_path/engine
-        work.mkdir()
-        results[engine] = md.quick_energy(utils.deepcopy_mol(cell), solver=engine,
-            solver_path=executable, work_dir=str(work), interaction_profile='portable', tmp_clear=True)
-        assert not (work/'radon_md_last.data').exists()
-    assert compare_static(results['lammps'], results['gromacs'], cell.GetNumAtoms())['status'] == 'pass'
+    reference = lammps.single_point(cell, tmp_path/'lammps', engines['lammps'])
+    candidate = gromacs.single_point(cell, tmp_path/'gromacs', engines['gromacs'])
+    comparison = compare_static(reference, candidate, cell.GetNumAtoms())
+    assert comparison['status'] == 'pass', comparison
 
 
 @pytest.mark.engines
-def test_failure_cannot_reuse_previous_result(molecule, engines, tmp_path):
-    solver = gromacs.Gromacs(tmp_path, solver_path=engines['gromacs'])
-    solver.make_dat(molecule)
-    options = md.MD(mol=molecule, interaction_profile='portable')
-    solver.make_input(options)
-    solver.exec()
-    with pytest.raises(FileExistsError, match='already exists'):
-        solver.exec()
+def test_failure_cannot_reuse_previous_result(molecule, gromacs_exec, tmp_path):
+    work = tmp_path/'gromacs'
+    gromacs.single_point(molecule, work, gromacs_exec)
+    with pytest.raises(FileExistsError):
+        gromacs.single_point(molecule, work, gromacs_exec)
 
 
 def test_ring_pairs_are_not_torsion_counted():
     from rdkit import Chem
     ring = Chem.MolFromSmiles('C1CCCCC1')
     assert set(gromacs._pairs14(ring)) == {(0, 3), (1, 4), (2, 5)}
-
-
-@pytest.mark.engines
-@pytest.mark.parametrize('ensemble', ['nve', 'nvt', 'npt'])
-def test_short_dynamics(molecule, engines, tmp_path, ensemble):
-    # Explicit velocities keep the comparison independent of engine RNGs.
-    np.random.seed(23)
-    from radonpy.core import calc
-    calc.set_velocity(molecule, 300)
-    kwargs = {'barostat': 'Parrinello-Rahman'} if ensemble == 'npt' else {}
-    result = getattr(md, 'quick_'+ensemble)(molecule, solver='gromacs',
-        solver_path=engines['gromacs'], work_dir=str(tmp_path),
-        interaction_profile='portable', step=10, time_step=0.1, **kwargs)
-    assert result[0].GetNumAtoms() == molecule.GetNumAtoms()
-    assert np.isfinite(result[1]).all()
-    assert not np.array_equal(result[1], molecule.GetConformer().GetPositions())

@@ -14,7 +14,7 @@ from radonpy.core import utils, poly, calc
 from radonpy.ff.gaff import GAFF
 from radonpy.ff.gaff2 import GAFF2
 from radonpy.ff.gaff2_mod import GAFF2_mod
-from radonpy.sim.gromacs import _write_molecule
+from tests.helpers.gromacs import _write_molecule
 
 
 def main():
