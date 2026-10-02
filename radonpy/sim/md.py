@@ -18,6 +18,7 @@ __version__ = '1.0b2'
 class MD():
     def __init__(self, **kwargs):
         self.idx = kwargs.get('idx', None)
+        self.interaction_profile = kwargs.get('interaction_profile')
 
         self.input_file = kwargs.get('input_file', 'radon_lmp.in' if self.idx is None else 'radon_lmp_%i.in' % self.idx)
         self.log_file = kwargs.get('log_file', 'radon_md.log' if self.idx is None else 'radon_md_%i.log' % self.idx)
@@ -109,6 +110,10 @@ class MD():
 
 
     def clear(self, work_dir):
+        if hasattr(self, '_gromacs_manifest'):
+            from .gromacs import clear_run
+            clear_run(self._gromacs_manifest)
+            return
         if os.path.exists(os.path.join(work_dir, self.input_file)):
             os.remove(os.path.join(work_dir, self.input_file))
 
@@ -118,7 +123,7 @@ class MD():
         if os.path.exists(os.path.join(work_dir, self.dat_file)):
             os.remove(os.path.join(work_dir, self.dat_file))
 
-        if os.path.exists(os.path.join(work_dir, self.dump_file)):
+        if self.dump_file is not None and os.path.exists(os.path.join(work_dir, self.dump_file)):
             os.remove(os.path.join(work_dir, self.dump_file))
 
         if self.xtc_file is not None:
@@ -163,6 +168,7 @@ class Dynamics():
         self.p_start = kwargs.get('p_start', 1.0)
         self.p_stop = kwargs.get('p_stop', 1.0)
         self.p_dump = kwargs.get('p_dump', 1000.0)
+        self.compressibility = kwargs.get('compressibility', 4.5e-5)  # GROMACS, bar^-1
         self.p_aniso = kwargs.get('p_aniso', False)
         self.px_start = kwargs.get('px_start', None)
         self.px_stop = kwargs.get('px_stop', None)
@@ -309,7 +315,7 @@ class Dynamics():
 
 
 def quick_energy(mol, confId=0, force=True, idx=None, tmp_clear=False,
-                solver='lammps', solver_path=None, work_dir=None, omp=1, mpi=0, gpu=0):
+                solver='lammps', solver_path=None, work_dir=None, omp=1, mpi=0, gpu=0, *, interaction_profile=None):
     """
     MD.quick_energy
 
@@ -333,7 +339,7 @@ def quick_energy(mol, confId=0, force=True, idx=None, tmp_clear=False,
 
     sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=idx)
 
-    md = MD(idx=idx, mol=mol)
+    md = MD(idx=idx, mol=mol, interaction_profile=interaction_profile)
     if not hasattr(mol, 'cell'):
         md.pbc = False
         calc.centering_mol(mol, confId=confId)
@@ -348,15 +354,15 @@ def quick_energy(mol, confId=0, force=True, idx=None, tmp_clear=False,
         utils.radon_print('Error termination of %s. Return code = %i' % (sol.get_name, cp.returncode), level=3)
         return None
 
-    anal = MD_analyzer(log_file=os.path.join(sol.work_dir, md.log_file))
+    anal = MD_analyzer(md_analyzer=solver, log_file=os.path.join(sol.work_dir, md.log_file))
     energy = anal.dfs[-1]['PotEng'].iat[-1]
 
     if force:
         _, _, _, _, force = sol.read_traj_simple(os.path.join(sol.work_dir, md.outstr))
-        if tmp_clear: md.clear(work_dir)
+        if tmp_clear: md.clear(sol.work_dir)
         return energy, force
     else:
-        if tmp_clear: md.clear(work_dir)
+        if tmp_clear: md.clear(sol.work_dir)
         return energy
 
 
@@ -385,7 +391,7 @@ def quick_min(mol, confId=0, min_style='cg', idx=None, tmp_clear=False,
 
     sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=idx)
 
-    md = MD(idx=idx, mol=mol_copy)
+    md = MD(idx=idx, mol=mol_copy, interaction_profile=kwargs.pop('interaction_profile', None))
     if not hasattr(mol_copy, 'cell'):
         md.pbc = False
         calc.centering_mol(mol_copy, confId=confId)
@@ -402,11 +408,11 @@ def quick_min(mol, confId=0, min_style='cg', idx=None, tmp_clear=False,
 
     mol_copy = sol.run(md, mol=mol_copy, confId=confId, last_data=md.write_data, last_str=md.outstr, omp=omp, mpi=mpi, gpu=gpu)
 
-    anal = MD_analyzer(log_file=os.path.join(sol.work_dir, md.log_file))
+    anal = MD_analyzer(md_analyzer=solver, log_file=os.path.join(sol.work_dir, md.log_file))
     energy = anal.dfs[-1]['PotEng'].iat[-1]
     uwstr, wstr, _, _, _ = sol.read_traj_simple(os.path.join(sol.work_dir, md.outstr))
 
-    if tmp_clear: md.clear(work_dir)
+    if tmp_clear: md.clear(sol.work_dir)
 
     return mol_copy, energy, uwstr
 
@@ -431,6 +437,20 @@ def quick_min_all(mol, min_style='cg', tmp_clear=False,
         energy (float, kcal/mol)
         Unwrapped coordinates (float, numpy.ndarray, angstrom)
     """
+    if solver.lower() == 'gromacs':
+        mol_copy = utils.deepcopy_mol(mol)
+        energies, coordinates = [], []
+        for conformer in mol.GetConformers():
+            cid = conformer.GetId()
+            result, energy, xyz = quick_min(
+                mol_copy, confId=cid, min_style=min_style, idx=cid,
+                tmp_clear=tmp_clear, solver=solver, solver_path=solver_path,
+                work_dir=work_dir, omp=omp, mpi=mpi, gpu=gpu, **kwargs)
+            mol_copy = result
+            energies.append(energy)
+            coordinates.append(xyz)
+        return mol_copy, energies, coordinates
+
     mol_copy = utils.deepcopy_mol(mol)
     input_files = []
     md_list = []
@@ -442,7 +462,7 @@ def quick_min_all(mol, min_style='cg', tmp_clear=False,
     for i in range(mol_copy.GetNumConformers()):
         sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=i)
 
-        md = MD(idx=i, mol=mol_copy)
+        md = MD(idx=i, mol=mol_copy, interaction_profile=kwargs.get('interaction_profile'))
         if not hasattr(mol_copy, 'cell'):
             md.pbc = False
             calc.centering_mol(mol_copy, confId=i)
@@ -487,14 +507,14 @@ def quick_min_all(mol, min_style='cg', tmp_clear=False,
                 if hasattr(mol_copy, 'cell'):
                     mol_copy = calc.mol_trans_in_cell(mol_copy, confId=confId)
 
-                anal = MD_analyzer(log_file=os.path.join(sol.work_dir, md.log_file))
+                anal = MD_analyzer(md_analyzer=solver, log_file=os.path.join(sol.work_dir, md.log_file))
                 energy = anal.dfs[-1]['PotEng'].iat[-1]
 
                 uwstr_list.append(uwstr)
                 energies.append(energy)
 
                 if tmp_clear:
-                    md.clear(work_dir)
+                    md.clear(sol.work_dir)
 
     return mol_copy, energies, uwstr_list
 
@@ -524,7 +544,7 @@ def quick_rw(mol, confId=0, step=100, time_step=0.2, temp=700, limit=0.1, shake=
 
     sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=idx)
 
-    md = MD(idx=idx, mol=mol_copy)
+    md = MD(idx=idx, mol=mol_copy, interaction_profile=kwargs.pop('interaction_profile', None))
     if not hasattr(mol_copy, 'cell'):
         md.pbc = False
         calc.centering_mol(mol_copy, confId=confId)
@@ -563,7 +583,7 @@ def quick_rw(mol, confId=0, step=100, time_step=0.2, temp=700, limit=0.1, shake=
     if hasattr(mol_copy, 'cell'):
         mol_copy = calc.mol_trans_in_cell(mol_copy, confId=confId)
 
-    if tmp_clear: md.clear(work_dir)
+    if tmp_clear: md.clear(sol.work_dir)
 
     return mol_copy, uwstr
 
@@ -595,7 +615,7 @@ def quick_nve(mol, confId=0, step=2000, time_step=None, limit=0.0, shake=False, 
 
     sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=idx)
 
-    md = MD(idx=idx, mol=mol_copy)
+    md = MD(idx=idx, mol=mol_copy, interaction_profile=kwargs.pop('interaction_profile', None))
     if not hasattr(mol_copy, 'cell'):
         md.pbc = False
         calc.centering_mol(mol_copy, confId=confId)
@@ -623,7 +643,7 @@ def quick_nve(mol, confId=0, step=2000, time_step=None, limit=0.0, shake=False, 
     if hasattr(mol_copy, 'cell'):
         mol_copy = calc.mol_trans_in_cell(mol_copy, confId=confId)
 
-    if tmp_clear: md.clear(work_dir)
+    if tmp_clear: md.clear(sol.work_dir)
 
     return mol_copy, uwstr
 
@@ -657,7 +677,7 @@ def quick_nvt(mol, confId=0, step=2000, time_step=None, temp=300.0, f_temp=None,
 
     sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=idx)
 
-    md = MD(idx=idx, mol=mol_copy)
+    md = MD(idx=idx, mol=mol_copy, interaction_profile=kwargs.pop('interaction_profile', None))
     if not hasattr(mol_copy, 'cell'):
         md.pbc = False
         calc.centering_mol(mol_copy, confId=confId)
@@ -686,7 +706,7 @@ def quick_nvt(mol, confId=0, step=2000, time_step=None, temp=300.0, f_temp=None,
     if hasattr(mol_copy, 'cell'):
         mol_copy = calc.mol_trans_in_cell(mol_copy, confId=confId)
 
-    if tmp_clear: md.clear(work_dir)
+    if tmp_clear: md.clear(sol.work_dir)
 
     return mol_copy, uwstr
 
@@ -724,7 +744,7 @@ def quick_npt(mol, confId=0, step=2000, time_step=None, temp=300.0, f_temp=None,
 
     sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=idx)
 
-    md = MD(idx=idx, mol=mol_copy)
+    md = MD(idx=idx, mol=mol_copy, interaction_profile=kwargs.pop('interaction_profile', None))
     if not hasattr(mol_copy, 'cell'):
         md.pbc = False
         calc.centering_mol(mol_copy, confId=confId)
@@ -754,7 +774,7 @@ def quick_npt(mol, confId=0, step=2000, time_step=None, temp=300.0, f_temp=None,
     setattr(mol_copy, 'cell', utils.Cell(cell[0, 1], cell[0, 0], cell[1, 1], cell[1, 0], cell[2, 1], cell[2, 0]))
     mol_copy = calc.mol_trans_in_cell(mol_copy, confId=confId)
 
-    if tmp_clear: md.clear(work_dir)
+    if tmp_clear: md.clear(sol.work_dir)
 
     return mol_copy, uwstr, cell
 
@@ -789,7 +809,7 @@ def quick_nph(mol, confId=0, step=2000, time_step=None, press=1.0, f_press=None,
 
     sol = MD_solver(md_solver=solver, work_dir=work_dir, solver_path=solver_path, idx=idx)
 
-    md = MD(idx=idx, mol=mol_copy)
+    md = MD(idx=idx, mol=mol_copy, interaction_profile=kwargs.pop('interaction_profile', None))
     if not hasattr(mol_copy, 'cell'):
         md.pbc = False
         calc.centering_mol(mol_copy, confId=confId)
@@ -818,7 +838,7 @@ def quick_nph(mol, confId=0, step=2000, time_step=None, press=1.0, f_press=None,
     setattr(mol_copy, 'cell', utils.Cell(cell[0, 1], cell[0, 0], cell[1, 1], cell[1, 0], cell[2, 1], cell[2, 0]))
     mol_copy = calc.mol_trans_in_cell(mol_copy, confId=confId)
 
-    if tmp_clear: md.clear(work_dir)
+    if tmp_clear: md.clear(sol.work_dir)
 
     return mol_copy, uwstr, cell
 

@@ -5,3 +5,8 @@
 build
 *__pycache__
 *.egg-info
+.venv/
+.venv-md/
+.pytest_cache/
+__pycache__/
+validation-results/

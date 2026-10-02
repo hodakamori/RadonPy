@@ -1,0 +1,29 @@
+name: Long MD campaign (manual)
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: Absolute path to a frozen campaign.json on the configured runner
+        type: string
+        required: true
+      output:
+        description: New output directory on the configured runner
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  campaign:
+    runs-on: [self-hosted, linux, radonpy-md]
+    timeout-minutes: 4320
+    env:
+      CAMPAIGN_CONFIG: ${{ inputs.config }}
+      CAMPAIGN_OUTPUT: ${{ inputs.output }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m radonpy.sim.validation_campaign run "$CAMPAIGN_CONFIG" --output "$CAMPAIGN_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: long-md-report
+          path: ${{ inputs.output }}/report.json

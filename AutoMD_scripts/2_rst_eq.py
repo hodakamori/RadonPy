@@ -43,6 +43,8 @@ if __name__ == '__main__':
     gpu = int(os.environ.get('RadonPy_GPU', 0))
     intel = os.environ.get('RadonPy_LAMMPS_INTEL', 'auto')
     opt = os.environ.get('RadonPy_LAMMPS_OPT', 'auto')
+    md_solver = os.environ.get('RadonPy_MD_Solver', 'lammps')
+    interaction_profile = os.environ.get('RadonPy_Interaction_Profile')
     retry_eq = int(os.environ.get('RadonPy_RetryEQ', 2))
     retry_eq = 2 if retry_eq == 0 else retry_eq
     rst_json_file = os.environ.get('RadonPy_JSON_File', None) 
@@ -66,7 +68,7 @@ if __name__ == '__main__':
         result = False
     else:
         last_idx = eq.get_final_idx(work_dir)
-        eqmd = eq.Additional(mol, work_dir=work_dir, idx=last_idx)
+        eqmd = eq.Additional(mol, solver=md_solver, interaction_profile=interaction_profile, work_dir=work_dir, idx=last_idx)
         analy = eqmd.analyze()
         analy.pdb_file = os.path.join(work_dir, 'eq1.pdb')
         prop_data = analy.get_all_prop(temp=data['temp'], press=data['press'], save=True)
@@ -75,7 +77,7 @@ if __name__ == '__main__':
     # Additional equilibration MD
     for i in range(retry_eq):
         if result: break
-        eqmd = eq.Additional(mol, work_dir=work_dir)
+        eqmd = eq.Additional(mol, solver=md_solver, interaction_profile=interaction_profile, work_dir=work_dir)
         mol = eqmd.exec(temp=data['temp'], press=data['press'], mpi=mpi, omp=omp, gpu=gpu, intel=intel, opt=opt)
         analy = eqmd.analyze()
         analy.pdb_file = os.path.join(work_dir, 'eq1.pdb')
